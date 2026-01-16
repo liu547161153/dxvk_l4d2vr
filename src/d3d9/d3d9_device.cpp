@@ -548,12 +548,19 @@ namespace dxvk {
               if (g_D3DVR9)
                 g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9HUDSurface, &texDesc);
           }
-		  else if (texID == VR::Texture_Scope)
+          else if (texID == VR::Texture_Scope)
           {
               textureTarget = &g_Game->m_VR->m_VKScope;
               texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9ScopeSurface);
               if (g_D3DVR9)
                 g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9ScopeSurface, &texDesc);
+          }
+          else if (texID == VR::Texture_RearMirror)
+          {
+              textureTarget = &g_Game->m_VR->m_VKRearMirror;
+              texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9RearMirrorSurface);
+              if (g_D3DVR9)
+                g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9RearMirrorSurface, &texDesc);
           }
           else if (texID == VR::Texture_Blank)
           {
@@ -3583,12 +3590,26 @@ namespace dxvk {
       ResolveImage(GetCommonTexture(g_Game->m_VR->m_D9RightEyeSurface));
     }
 
-    if (g_D3DVR9)
-      g_D3DVR9->WaitDeviceIdle();
-    
-    if (g_Game && g_Game->m_VR)
-    {
-        g_Game->m_VR->Update();
+    if (g_D3DVR9) {
+      const int32_t vrSyncMode = GetOptions()->vrSyncMode;
+
+      // Important: OpenVR uses the VkQueue we expose in VRVulkanTextureData_t.
+      // DXVK has a command stream thread that may submit work to the same queue
+      // after Present returns. If the VR compositor submits in between, we can
+      // get re-ordering hazards (and people "fix" it with device-wide idle waits).
+      //
+      // vrSyncMode=1 avoids the full GPU stall by only ensuring DXVK has finished
+      // emitting submissions for this frame before VR::Update submits to OpenVR.
+      if (vrSyncMode <= 0) {
+        g_D3DVR9->WaitDeviceIdle();
+      } else {
+        Flush();
+        SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+      }
+    }
+
+    if (g_Game && g_Game->m_VR) {
+      g_Game->m_VR->Update();
     }
 	  
 	return result;

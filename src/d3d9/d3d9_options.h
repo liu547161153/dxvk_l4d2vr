@@ -155,6 +155,11 @@ namespace dxvk {
     /// Use device local memory for constant buffers.
     bool deviceLocalConstantBuffers;
 
+    /// VR compositor synchronization mode (L4D2VR custom build)
+    /// 0: Flush + wait for device idle each frame (safest, worst frametime)
+    /// 1: Flush + sync DXVK CS thread each frame (better performance, still ordered)
+    int32_t vrSyncMode;
+
     /// Disable direct buffer mapping
     bool allowDirectBufferMapping;
   };
