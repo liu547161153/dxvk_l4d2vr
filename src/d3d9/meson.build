@@ -91,7 +91,7 @@ if platform != 'windows'
 endif
 
 d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
-  dependencies        : [ dxso_dep, dxvk_dep ] + d3d9_extra_deps,
+  dependencies        : [ dxso_dep, dxvk_dep, dxbc_spirv_dep ] + d3d9_extra_deps,
   include_directories : d3d9_inc_dirs,
   install             : true,
   vs_module_defs      : 'd3d9'+def_spec_ext,
