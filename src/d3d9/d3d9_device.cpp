@@ -25,11 +25,31 @@
 
 #include "d3d9_initializer.h"
 
+#include "L4D2VR/game.h"
+#include "L4D2VR/vr.h"
+#include "L4D2VR/sdk/sdk.h"
+#include "d3d9_vr.h"
+
 #include <algorithm>
 #include <cfloat>
+#include <cstring>
 #ifdef MSC_VER
 #pragma fenv_access (on)
 #endif
+
+namespace {
+
+  D3DMULTISAMPLE_TYPE MapToMultisampleType(int numSamples) {
+    switch (numSamples) {
+      case 16: return D3DMULTISAMPLE_16_SAMPLES;
+      case 8:  return D3DMULTISAMPLE_8_SAMPLES;
+      case 4:  return D3DMULTISAMPLE_4_SAMPLES;
+      case 2:  return D3DMULTISAMPLE_2_SAMPLES;
+      default: return D3DMULTISAMPLE_NONE;
+    }
+  }
+
+}
 
 namespace dxvk {
 
@@ -494,6 +514,11 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters) {
+    if (pPresentationParameters != nullptr && g_Game && g_Game->m_VR) {
+      pPresentationParameters->BackBufferWidth = g_Game->m_VR->m_RenderWidth;
+      pPresentationParameters->BackBufferHeight = g_Game->m_VR->m_RenderHeight;
+    }
+
     D3D9DeviceLock lock = LockDevice();
 
     Logger::info("Device reset");
@@ -677,6 +702,13 @@ namespace dxvk {
                             || (Usage & D3DUSAGE_DYNAMIC)
                             || IsVendorFormat(EnumerateFormat(Format));
 
+    if (g_Game && g_Game->m_VR
+     && (g_Game->m_VR->m_CreatingTextureID == VR::Texture_LeftEye
+      || g_Game->m_VR->m_CreatingTextureID == VR::Texture_RightEye)) {
+      dxvk::Logger::info(str::format("Creating texture with MSAA ", g_Game->m_VR->m_AntiAliasing));
+      desc.MultiSample = MapToMultisampleType(g_Game->m_VR->m_AntiAliasing);
+    }
+
     HRESULT hr = D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_TEXTURE, &desc);
     if (FAILED(hr))
       return hr;
@@ -704,6 +736,45 @@ namespace dxvk {
 
       m_initializer->InitTexture(texture->GetCommonTexture(), initialData);
       *ppTexture = texture.ref();
+
+      if (g_Game && g_Game->m_VR && g_Game->m_VR->m_CreatingTextureID != VR::Texture_None && g_D3DVR9) {
+        SharedTextureHolder* textureTarget = nullptr;
+        D3D9_TEXTURE_VR_DESC texDesc = { };
+        VR::TextureID texID = g_Game->m_VR->m_CreatingTextureID;
+
+        if (texID == VR::Texture_LeftEye) {
+          textureTarget = &g_Game->m_VR->m_VKLeftEye;
+          texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9LeftEyeSurface);
+          g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9LeftEyeSurface, &texDesc);
+        } else if (texID == VR::Texture_RightEye) {
+          textureTarget = &g_Game->m_VR->m_VKRightEye;
+          texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9RightEyeSurface);
+          g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9RightEyeSurface, &texDesc);
+        } else if (texID == VR::Texture_HUD) {
+          textureTarget = &g_Game->m_VR->m_VKHUD;
+          texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9HUDSurface);
+          g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9HUDSurface, &texDesc);
+        } else if (texID == VR::Texture_Scope) {
+          textureTarget = &g_Game->m_VR->m_VKScope;
+          texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9ScopeSurface);
+          g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9ScopeSurface, &texDesc);
+        } else if (texID == VR::Texture_RearMirror) {
+          textureTarget = &g_Game->m_VR->m_VKRearMirror;
+          texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9RearMirrorSurface);
+          g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9RearMirrorSurface, &texDesc);
+        } else if (texID == VR::Texture_Blank) {
+          textureTarget = &g_Game->m_VR->m_VKBlankTexture;
+          texture.ref()->GetSurfaceLevel(0, &g_Game->m_VR->m_D9BlankSurface);
+          g_D3DVR9->GetVRDesc(g_Game->m_VR->m_D9BlankSurface, &texDesc);
+        }
+
+        if (textureTarget != nullptr) {
+          std::memcpy(&textureTarget->m_VulkanData, &texDesc, sizeof(vr::VRVulkanTextureData_t));
+          textureTarget->m_VRTexture.handle = &textureTarget->m_VulkanData;
+          textureTarget->m_VRTexture.eColorSpace = vr::ColorSpace_Auto;
+          textureTarget->m_VRTexture.eType = vr::TextureType_Vulkan;
+        }
+      }
 
       if (desc.Pool == D3DPOOL_DEFAULT)
         m_losableResourceCounter++;
@@ -2130,6 +2201,18 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetViewport(const D3DVIEWPORT9* pViewport) {
+    // TODO: Overriding the viewport in-game will mess up shadows,
+    // so only do it in menus for now.
+    if (pViewport != nullptr
+     && g_Game
+     && g_Game->m_VR
+     && g_Game->m_EngineClient
+     && !g_Game->m_EngineClient->IsInGame()) {
+      D3DVIEWPORT9* newViewport = const_cast<D3DVIEWPORT9*>(pViewport);
+      newViewport->Width = g_Game->m_VR->m_RenderWidth;
+      newViewport->Height = g_Game->m_VR->m_RenderHeight;
+    }
+
     D3D9DeviceLock lock = LockDevice();
 
     // Outright crashes on native, but let's be
@@ -4318,12 +4401,76 @@ namespace dxvk {
       }
     }
 
-    return m_implicitSwapchain->Present(
+    HRESULT result = m_implicitSwapchain->Present(
       pSourceRect,
       pDestRect,
       hDestWindowOverride,
       pDirtyRegion,
       dwFlags);
+
+    if (g_Game && g_Game->m_VR && g_Game->m_VR->m_CreatedVRTextures) {
+      VR* vr = g_Game->m_VR;
+      const bool inGame = (g_Game->m_EngineClient && g_Game->m_EngineClient->IsInGame());
+      const bool queued = (g_Game->GetMatQueueMode() != 0);
+
+      // In queued mode, Present can outrun dRenderView and repeatedly submit stale textures.
+      // Wait a tiny budget for a freshly rendered frame to reduce compositor jitter.
+      if (queued && inGame) {
+        uint32_t completed = vr->m_RenderCompletedFrameId.load(std::memory_order_acquire);
+        const uint32_t submitted = vr->m_LastSubmittedFrameId.load(std::memory_order_acquire);
+
+        if (completed <= submitted && vr->m_RenderFrameReadyEvent && vr->m_QueuedSubmitWaitMs > 0) {
+          const DWORD waitMs = static_cast<DWORD>(vr->m_QueuedSubmitWaitMs);
+          WaitForSingleObject(vr->m_RenderFrameReadyEvent, waitMs);
+          completed = vr->m_RenderCompletedFrameId.load(std::memory_order_acquire);
+        }
+      }
+
+      auto resolveVrSurface = [this] (IDirect3DSurface9* surface) {
+        D3D9CommonTexture* commonTex = GetCommonTexture(surface);
+        if (commonTex == nullptr)
+          return;
+
+        auto image = commonTex->GetImage();
+        bool needsResolve = image != nullptr && image->info().sampleCount != VK_SAMPLE_COUNT_1_BIT;
+
+        if (needsResolve) {
+          const D3D9_VK_FORMAT_MAPPING formatInfo = LookupFormat(commonTex->Desc()->Format);
+          const VkImageSubresource subresource = commonTex->GetSubresourceFromIndex(formatInfo.Aspect, 0);
+
+          VkImageResolve region;
+          region.srcSubresource = { subresource.aspectMask, subresource.mipLevel, subresource.arrayLayer, 1 };
+          region.srcOffset = { 0, 0, 0 };
+          region.dstSubresource = region.srcSubresource;
+          region.dstOffset = { 0, 0, 0 };
+          region.extent = image->info().extent;
+
+          EmitCs([
+            cDstImage = commonTex->GetResolveImage(),
+            cSrcImage = image,
+            cRegion = region
+          ] (DxvkContext* ctx) {
+            ctx->resolveImage(
+              cDstImage, cSrcImage, cRegion, cSrcImage->info().format,
+              VK_RESOLVE_MODE_AVERAGE_BIT, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT);
+          });
+        }
+      };
+
+      if (vr->m_D9LeftEyeSurface)
+        resolveVrSurface(vr->m_D9LeftEyeSurface);
+      if (vr->m_D9RightEyeSurface)
+        resolveVrSurface(vr->m_D9RightEyeSurface);
+    }
+
+    // Keep conservative sync behavior for stability.
+    if (g_D3DVR9)
+      g_D3DVR9->WaitDeviceIdle();
+
+    if (g_Game && g_Game->m_VR)
+      g_Game->m_VR->Update();
+
+    return result;
   }
 
 
@@ -4510,6 +4657,13 @@ namespace dxvk {
     desc.IsBackBuffer       = FALSE;
     desc.IsAttachmentOnly   = TRUE;
     desc.IsLockable         = IsLockableDepthStencilFormat(desc.Format);
+
+    if (g_Game && g_Game->m_VR
+     && (g_Game->m_VR->m_CreatingTextureID == VR::Texture_LeftEye
+      || g_Game->m_VR->m_CreatingTextureID == VR::Texture_RightEye)) {
+      dxvk::Logger::info(str::format("Creating depth/stencil surface with MSAA ", g_Game->m_VR->m_AntiAliasing));
+      desc.MultiSample = MapToMultisampleType(g_Game->m_VR->m_AntiAliasing);
+    }
 
     HRESULT hr = D3D9CommonTexture::NormalizeTextureProperties(this, D3DRTYPE_SURFACE, &desc);
     if (FAILED(hr))
