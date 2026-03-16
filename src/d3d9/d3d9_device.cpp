@@ -4467,10 +4467,26 @@ namespace dxvk {
         }
       };
 
-      if (vr->m_D9LeftEyeSurface)
-        resolveVrSurface(vr->m_D9LeftEyeSurface);
-      if (vr->m_D9RightEyeSurface)
-        resolveVrSurface(vr->m_D9RightEyeSurface);
+      IDirect3DSurface9* leftEyeSurface = nullptr;
+      IDirect3DSurface9* rightEyeSurface = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(vr->m_TextureMutex);
+        leftEyeSurface = vr->m_D9LeftEyeSurface;
+        rightEyeSurface = vr->m_D9RightEyeSurface;
+        if (leftEyeSurface)
+          leftEyeSurface->AddRef();
+        if (rightEyeSurface)
+          rightEyeSurface->AddRef();
+      }
+
+      if (leftEyeSurface) {
+        resolveVrSurface(leftEyeSurface);
+        leftEyeSurface->Release();
+      }
+      if (rightEyeSurface) {
+        resolveVrSurface(rightEyeSurface);
+        rightEyeSurface->Release();
+      }
     }
 
     // Keep conservative sync behavior for stability.
